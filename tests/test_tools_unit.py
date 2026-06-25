@@ -679,6 +679,76 @@ class TestPublishArtifact:
         assert "isError" not in result  # home-dir check skipped; file still published
         assert result["key"] in client.objects
 
+    # -- RF12: the gate must stay total under EACCES and never leak the resolved path
+
+    @pytest.mark.skipif(
+        os.geteuid() == 0,
+        reason="EACCES arm requires a non-root user (root bypasses the permission check)",
+    )
+    @pytest.mark.asyncio
+    async def test_unreadable_source_path_is_refusal_without_leaking_resolved_path(
+        self, tmp_path
+    ) -> None:
+        # RF12 / adversarial ADV4-1 + RR-1: _check_source_path is documented to
+        # never raise and publish_artifact consumes it unguarded, so a syscall that
+        # hits EACCES under the allow-list root must become a *curated* structured
+        # refusal -- and that refusal must echo only the caller-supplied source_path,
+        # never the *resolved* absolute path (OSError.filename), which would leak the
+        # real on-disk location. Here an unreadable (mode 000) regular file passes
+        # is_file()/stat() but raises in read_bytes(); before RF12 the catch
+        # interpolated the raw OSError and leaked the resolved path.
+        secret = tmp_path / "secret.html"
+        secret.write_text("<h1>x</h1>", encoding="utf-8")
+        resolved = str(secret.resolve())
+        os.chmod(secret, 0o000)  # unreadable file; the parent dir stays searchable
+        try:
+            # A non-canonical source_path (redundant "/./") makes the resolved
+            # absolute path a textually distinct substring, so a leak is detectable
+            # even though the caller-supplied value is echoed back.
+            supplied = f"{tmp_path}/./secret.html"
+            client = FakeGCSClient()
+            result = await publish_artifact(
+                title="t",
+                source_path=supplied,
+                ctx=_ctx_for(client, source_root=str(tmp_path)),
+            )
+        finally:
+            os.chmod(secret, 0o600)  # restore so tmp_path teardown can unlink it
+        assert result["isError"] is True  # curated refusal, not a raised exception
+        assert client.objects == {}  # nothing uploaded
+        assert resolved not in result["error"]  # the resolved absolute path is not leaked
+        assert resolved not in result.get("hint", "")
+
+    @pytest.mark.asyncio
+    async def test_source_path_when_is_file_raises_oserror_is_structured_refusal(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        # RF12 / adversarial ADV4-1: on CPython versions where Path.is_file()
+        # re-raises a non-ignored OSError (EACCES on a no-search parent dir;
+        # EIO / ESTALE on a stale mount) rather than returning False, the never-raise
+        # gate would propagate it out of publish_artifact. The blanket OSError guard
+        # must turn it into a curated refusal that does not echo the resolved
+        # absolute path. Monkeypatched so the arm is exercised deterministically
+        # regardless of the host interpreter's is_file() errno handling (mirrors the
+        # RF11 Path.home monkeypatch above).
+        src = tmp_path / "report.html"
+        src.write_text("<h1>x</h1>", encoding="utf-8")
+        resolved = str(src.resolve())
+
+        def _raise_eacces(self: Path, *args: object, **kwargs: object) -> bool:
+            raise PermissionError(13, "Permission denied", str(self))
+
+        monkeypatch.setattr(Path, "is_file", _raise_eacces)
+        client = FakeGCSClient()
+        result = await publish_artifact(
+            title="t",
+            source_path=f"{tmp_path}/./report.html",  # non-canonical: resolved != supplied
+            ctx=_ctx_for(client, source_root=str(tmp_path)),
+        )
+        assert result["isError"] is True  # curated refusal, never a propagated exception
+        assert client.objects == {}  # nothing uploaded
+        assert resolved not in result["error"]  # PermissionError.filename not leaked
+
     @pytest.mark.asyncio
     async def test_inline_title_ending_in_version_token_is_html_not_bin(self) -> None:
         # RF3 at the tool level: a version-like title token must not mislabel inline

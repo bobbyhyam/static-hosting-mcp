@@ -552,7 +552,25 @@ def _check_source_path(source_path: str, config: Config) -> tuple[Path | None, d
             hint=f"Place the file under {ENV_SOURCE_ROOT} ({root}), or pass inline `content`.",
         )
 
-    if not resolved.is_file():
+    # is_file() can re-raise OSError on some platforms / CPython versions (EACCES
+    # on a no-search parent directory under the root; EIO / ESTALE on a stale
+    # network mount). On the project's CPython, is_file() delegates to
+    # os.path.isfile and swallows these (returning False), but the gate is
+    # documented to *never* raise (R17/KTD11) and publish_artifact consumes it
+    # unguarded, so guard the syscall with a blanket OSError -> curated refusal so
+    # the contract holds on every interpreter. The message echoes only the
+    # caller-supplied source_path -- never exc itself, whose OSError.filename is
+    # the *resolved* absolute path and would leak the real on-disk location
+    # (RF12 / adversarial ADV4-1).
+    try:
+        is_regular_file = resolved.is_file()
+    except OSError as exc:
+        return None, error(
+            f"Could not access source_path {source_path!r}: "
+            f"{exc.strerror or exc.__class__.__name__}.",
+            hint="Provide a path to an existing, readable regular file, or pass inline `content`.",
+        )
+    if not is_regular_file:
         return None, error(
             f"source_path {source_path!r} is not a regular file (it may be missing, a "
             "directory, or a special/device file); it was not read and no object was "
@@ -677,17 +695,23 @@ async def publish_artifact(
         assert source_path is not None
         # RF1: confine the read to the operator's allow-list root, refuse secret
         # shapes, and require a regular file — all before any I/O on the bytes.
-        resolved, src_error = _check_source_path(source_path, config)
+        # Offloaded off the stdio event loop (like the bytes read below) so the
+        # gate's resolve() / is_file() syscalls cannot freeze the loop on a hung or
+        # stale network mount under the root (RF12 / adversarial RR-1).
+        resolved, src_error = await asyncio.to_thread(_check_source_path, source_path, config)
         if src_error is not None:
             return src_error
         assert resolved is not None
         # Size-cap from a stat *before* reading, so an oversized (or special) file
         # is refused without being pulled into memory (RF1 OOM guard).
         try:
-            file_size = resolved.stat().st_size
+            file_size = (await asyncio.to_thread(resolved.stat)).st_size
         except OSError as exc:
+            # exc.strerror, not exc: str(exc) carries OSError.filename, the
+            # resolved absolute path, which must not leak to the agent (RF12).
             return error(
-                f"Could not read source_path {source_path!r}: {exc}.",
+                f"Could not read source_path {source_path!r}: "
+                f"{exc.strerror or exc.__class__.__name__}.",
                 hint="Check the file exists and is readable from the server's working directory.",
             )
         if file_size > config.artifact_max_bytes:
@@ -702,8 +726,11 @@ async def publish_artifact(
         try:
             data = await asyncio.to_thread(resolved.read_bytes)
         except OSError as exc:
+            # exc.strerror, not exc: str(exc) carries OSError.filename, the
+            # resolved absolute path, which must not leak to the agent (RF12).
             return error(
-                f"Could not read source_path {source_path!r}: {exc}.",
+                f"Could not read source_path {source_path!r}: "
+                f"{exc.strerror or exc.__class__.__name__}.",
                 hint="Check the file exists and is readable from the server's working directory.",
             )
 
