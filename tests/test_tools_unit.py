@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import os
 import re
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -625,6 +626,58 @@ class TestPublishArtifact:
         assert result["isError"] is True
         assert "over the" in result["error"]
         assert client.objects == {}
+
+    # -- RF11: the source-path gate must honor its never-raise contract ------
+
+    @pytest.mark.asyncio
+    async def test_source_path_with_nul_byte_is_structured_error_no_upload(
+        self, tmp_path
+    ) -> None:
+        # RF11 / C3: a source_path with an embedded NUL byte makes Path.resolve()
+        # raise ValueError ("embedded null character in path"), which the gate's
+        # original narrow `except OSError` missed -- so _check_source_path, which
+        # is documented to NEVER raise (R17/KTD11) and is called unguarded by
+        # publish_artifact, would propagate the ValueError. Pydantic does not strip
+        # NUL from a str, so "a\x00b" reaches the tool. The widened
+        # `except (OSError, ValueError)` must turn it into the same structured
+        # refusal with no upload -- BOTH when source_path uploads are disabled
+        # (no root: the crash happened before the default-deny) and when a root is
+        # configured.
+        for source_root in (None, str(tmp_path)):
+            client = FakeGCSClient()
+            result = await publish_artifact(
+                title="t",
+                source_path="a\x00b",
+                ctx=_ctx_for(client, source_root=source_root),
+            )
+            assert result["isError"] is True, source_root
+            assert "source_path" in result["error"]
+            assert client.objects == {}, source_root
+
+    @pytest.mark.asyncio
+    async def test_source_path_when_home_undeterminable_does_not_raise(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        # RF11 / reliability-5: _is_secret_path calls Path.home(), which raises
+        # RuntimeError when the home dir cannot be resolved (HOME unset and no pwd
+        # entry for the uid -- a real distroless / scratch container shape). It runs
+        # on every source_path attempt, before the default-deny, so an unguarded
+        # call would crash the never-raise gate. The guard must skip only the
+        # home-dir secret checks and let a normal file under the root still publish.
+        def _no_home(*args: object, **kwargs: object) -> Path:
+            raise RuntimeError("Could not determine home directory")
+
+        monkeypatch.setattr(Path, "home", _no_home)
+        src = tmp_path / "notes.md"
+        src.write_text("# hi\n", encoding="utf-8")
+        client = FakeGCSClient()
+        result = await publish_artifact(
+            title="t",
+            source_path=str(src),
+            ctx=_ctx_for(client, source_root=str(tmp_path)),
+        )
+        assert "isError" not in result  # home-dir check skipped; file still published
+        assert result["key"] in client.objects
 
     @pytest.mark.asyncio
     async def test_inline_title_ending_in_version_token_is_html_not_bin(self) -> None:

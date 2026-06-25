@@ -488,12 +488,21 @@ def _is_secret_path(resolved: Path, config: Config) -> bool:
         try:
             if resolved == Path(config.key_path).resolve():
                 return True
-        except OSError:  # pragma: no cover - resolve() of a configured path
+        except (OSError, ValueError):  # pragma: no cover - resolve() of a configured path
             pass
-    home = Path.home()
-    for protected in (home / ".ssh", home / ".config" / "gcloud", home / ".gnupg"):
-        if _is_within(resolved, protected):
-            return True
+    # Path.home() raises RuntimeError when the home dir cannot be determined
+    # (HOME unset and no pwd entry for the uid -- a real distroless / scratch
+    # container shape). This gate must never raise (R17/KTD11), so on that shape
+    # skip only the home-dir secret checks; the secrets/ directory-component and
+    # *.pem / *.key suffix checks below still run.
+    try:
+        home: Path | None = Path.home()
+    except RuntimeError:
+        home = None
+    if home is not None:
+        for protected in (home / ".ssh", home / ".config" / "gcloud", home / ".gnupg"):
+            if _is_within(resolved, protected):
+                return True
     if any(part in _SECRET_DIR_NAMES for part in resolved.parts):
         return True
     return resolved.suffix.lower() in _SECRET_PATH_SUFFIXES
@@ -511,7 +520,12 @@ def _check_source_path(source_path: str, config: Config) -> tuple[Path | None, d
     """
     try:
         resolved = Path(source_path).resolve()
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
+        # OSError covers unresolvable paths; ValueError covers an embedded NUL
+        # byte ("embedded null character in path"), which Pydantic does not strip
+        # from a str. _check_source_path is documented to never raise (R17/KTD11);
+        # publish_artifact calls it unguarded, so both must become a refusal here
+        # (mirrors _is_within, which already catches (OSError, ValueError)).
         return None, error(f"Could not resolve source_path {source_path!r}: {exc}.")
 
     if _is_secret_path(resolved, config):
