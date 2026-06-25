@@ -43,20 +43,20 @@ supplies real grantees. Each test deletes the object it created on teardown.
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 import urllib.error
 import urllib.request
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager, suppress
-from typing import Any
 
 import pytest
 from mcp import ClientSession, StdioServerParameters
-from mcp.client.stdio import stdio_client
 
 from static_hosting_mcp.config import Config
 from static_hosting_mcp.gcs_client import GCSClient, ObjectNotFoundError
+
+from .mcp_harness import call_tool as _call
+from .mcp_harness import mcp_session
 
 pytestmark = [pytest.mark.live]
 
@@ -100,48 +100,22 @@ def _real_client(config: Config) -> GCSClient:
 
 @asynccontextmanager
 async def _mcp_session() -> AsyncIterator[ClientSession]:
-    """Spawn the server as a stdio subprocess and yield an initialized session.
+    """Spawn the real server as a stdio subprocess and yield an initialized session.
 
     Mirrors the reference ``test_tools.py``: ``uv run static-hosting-mcp`` is the
-    console-script entry point, launched under ``stdio_client``. The child
-    inherits this process's environment (``.env`` already loaded by
-    ``conftest.py``) so its lifespan builds the real client against the same
-    bucket.
+    console-script entry point. The child inherits this process's environment
+    (``.env`` already loaded by ``conftest.py``) so its lifespan builds the real
+    client against the same bucket. Delegates to the shared stdio harness
+    (``mcp_session``) so this live tier and the always-on E2E tier
+    (``test_server_stdio.py``) cannot drift on session setup or result parsing.
     """
     params = StdioServerParameters(
         command="uv",
         args=["run", "static-hosting-mcp"],
         env=dict(os.environ),
     )
-    async with stdio_client(params) as (read, write):
-        async with ClientSession(read, write) as session:
-            await session.initialize()
-            yield session
-
-
-def _parse_result(result: Any) -> dict[str, Any]:
-    """Extract a tool's returned ``dict`` from an MCP ``CallToolResult``.
-
-    FastMCP serializes a ``dict`` return into both ``structuredContent`` and a
-    JSON ``TextContent`` block; some versions nest a non-model dict under a
-    ``result`` key. Prefer the structured payload (unwrapping that nesting) and
-    fall back to parsing the text block.
-    """
-    structured = getattr(result, "structuredContent", None)
-    if isinstance(structured, dict):
-        if set(structured) == {"result"} and isinstance(structured["result"], dict):
-            return structured["result"]
-        return structured
-    for block in result.content:
-        text = getattr(block, "text", None)
-        if text:
-            return json.loads(text)
-    raise AssertionError(f"no parseable dict in tool result: {result!r}")
-
-
-async def _call(session: ClientSession, name: str, **arguments: Any) -> dict[str, Any]:
-    """Call a tool by name and return its parsed ``dict`` result."""
-    return _parse_result(await session.call_tool(name, arguments))
+    async with mcp_session(params) as session:
+        yield session
 
 
 def _http_status(url: str) -> int:
