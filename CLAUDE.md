@@ -25,11 +25,15 @@ order before merging:
 2. **Drive the live server interactively** through the **tmux loop** below — the
    manual, exploratory form of the check. Use it while iterating to see real tool
    output without reloading your own session.
-3. **(When credentials are configured)** run the live integration tier against the
-   real bucket:
+3. **Live integration tier** — runs against the **dedicated dev bucket** in `.env`
+   (publish → get → delete through the real transport, plus an anonymous-GET
+   privacy check; it creates and cleans up its own objects):
    ```bash
    uv run pytest -m live    # skips cleanly if .env is not populated
    ```
+   The grant/revoke ACL tests additionally need real grantee accounts in
+   `GCS_TEST_GRANTEE` / `GCS_TEST_GRANTEES` (GCS rejects unknown principals) and
+   skip when those are unset.
 
 The automated **stdio E2E tier** ([`tests/test_server_stdio.py`](tests/test_server_stdio.py))
 is the durable, CI-able form of the tmux loop: it spawns the server over stdio
@@ -40,6 +44,13 @@ transport, but with the GCS leaf swapped for an in-memory fake
 Add to it whenever you add or change a tool.
 
 ## The `.mcp.json` dev server
+
+> **The dev environment targets a dedicated dev bucket — its data is disposable.**
+> The `.env` in this checkout points `GCS_BUCKET` at a bucket that exists solely
+> for development and testing; it holds **no production data**. Publish, grant,
+> revoke, get, list, and delete against it freely — both the live test tier and
+> the tmux loop create and delete objects there as they run, and nothing in it is
+> precious. (Never point `.env` at a production bucket.)
 
 A **gitignored** `.mcp.json` at the repo root registers this server with any
 Claude Code session opened in this directory, so the session can call the six
@@ -116,8 +127,10 @@ tmux kill-session -t mcptest
 Tips:
 - Send **one focused instruction per turn** and capture after each; the second
   instance is a full agent, so be explicit about which tool and arguments to use.
-- It hits the **real bucket** (via `.env`), so anything you `publish_artifact` is
-  real — `delete_artifact` it (or note the key) when you are done.
+- It hits the **dedicated dev bucket** (via `.env`), which is safe to mutate:
+  `publish_artifact`, `grant_access`/`revoke_access`, and `delete_artifact` freely
+  — nothing there is production data. Clean up test objects when convenient to
+  avoid clutter, but you don't need to treat them as precious.
 - If `capture-pane` shows the instance still working, `sleep` and capture again
   rather than sending the next prompt.
 
@@ -126,7 +139,7 @@ Tips:
 - **Editing tool logic / shapes / errors** → unit tests + the stdio E2E tier
   (`uv run pytest`), then the tmux loop to eyeball real output.
 - **Touching the GCS client or anything ACL/credential-related** → also run
-  `uv run pytest -m live` against a real bucket (or the tmux loop, which uses it).
+  `uv run pytest -m live` against the dev bucket (or the tmux loop, which uses it).
 - **Adding a new tool** → add an in-process unit test
   ([`tests/test_tools_unit.py`](tests/test_tools_unit.py)) *and* extend the stdio
   E2E tier so the tool is exercised through the transport.
