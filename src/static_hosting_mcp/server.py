@@ -586,10 +586,14 @@ async def publish_artifact(
         str | None,
         Field(
             description=(
-                "Path to a local file to upload as-is (text or binary). Provide "
-                "this OR `content`, never both."
+                "Path to a local file to upload as-is. Disabled by default: the "
+                "operator must set the ARTIFACT_SOURCE_ROOT environment variable "
+                "to an allowed directory, and the file must resolve inside that "
+                "root (credential- or secret-shaped paths are refused even then, "
+                "and the file is size-capped by ARTIFACT_MAX_BYTES). Prefer inline "
+                "`content`, which is the default and needs no operator setup. "
+                "Provide this OR `content`, never both."
             ),
-            examples=["/home/user/report.pdf", "out/summary.md"],
         ),
     ] = None,
     content_type: Annotated[
@@ -616,13 +620,19 @@ async def publish_artifact(
 ) -> dict:
     """Publish a single artifact to cloud storage and return its permanent URL.
 
-    Provide EITHER inline `content` OR a local `source_path` (exactly one), plus
-    a `title`; optionally pre-share it by passing `grant_emails`. Use this to
-    publish — and optionally share — in one step; to share an artifact that
-    already exists, use `grant_access`. Returns a dict with the object `key`, the
-    authenticated `url`, the stored `content_type`, the byte `size`, and the
-    per-email `grants` (empty when no `grant_emails` were given). On a UBLA-on
-    bucket the object is uploaded but the grant returns an actionable error.
+    Provide EITHER inline `content` (the default, no operator setup required) OR
+    a local `source_path` (only when the operator has enabled it via
+    `ARTIFACT_SOURCE_ROOT` — see that parameter) — exactly one — plus a `title`;
+    optionally pre-share it by passing `grant_emails`. Use this to publish — and
+    optionally share — in one step; to share an artifact that already exists, use
+    `grant_access`. Returns a dict with the object `key`, the authenticated
+    `url`, the stored `content_type`, the byte `size`, the per-email `grants`
+    (empty when no `grant_emails` were given), and an optional `warning`. If a
+    post-upload grant fails (e.g. on a UBLA-on bucket) the object is still
+    uploaded and addressable: the result is a success-with-warning that carries
+    the recoverable `key`/`url`, marks the failed emails in `grants`, and sets
+    `warning` — retry the grant with `grant_access`; do NOT re-publish, which
+    would mint a duplicate object.
     """
     app = _ctx(ctx)
     client = app.client
