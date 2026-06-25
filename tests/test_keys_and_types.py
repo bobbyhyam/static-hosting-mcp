@@ -163,3 +163,26 @@ def test_infer_source_path_takes_precedence_over_title():
 def test_infer_dotted_title_without_real_extension_is_inline_default():
     # The trailing token after the last dot is not a short extension.
     assert infer_content_type(title="v1.2 release plan") == DEFAULT_INLINE_CONTENT_TYPE
+
+
+@pytest.mark.parametrize(
+    "title",
+    ["Roadmap v1.0", "Q2 report v2.1", "Budget 2026.06"],
+)
+def test_infer_inline_title_ending_in_version_token_is_inline_default(title):
+    # RF3: a human title ending in a version/date-like dotted token ("Roadmap
+    # v1.0" -> "0") parses as a trailing extension but is NOT a recognized type;
+    # it must fall through to the inline HTML default, not octet-stream (which
+    # would yield a .bin key and download instead of render the artifact).
+    assert infer_content_type(content_type=None, source_path=None, title=title) == (
+        DEFAULT_INLINE_CONTENT_TYPE
+    )
+
+
+def test_infer_source_path_unknown_extension_still_octet_stream_for_real_files():
+    # RF3 must not regress source-path inference: a real file with an unrecognized
+    # extension is genuinely opaque binary even if a version-like title is present.
+    assert (
+        infer_content_type(source_path="archive.xyz", title="Roadmap v1.0")
+        == UNKNOWN_CONTENT_TYPE
+    )

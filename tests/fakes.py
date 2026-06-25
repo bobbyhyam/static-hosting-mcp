@@ -53,6 +53,14 @@ class FakeGCSClient:
         self.objects: dict[str, tuple[bytes, str, str, int]] = {}
         # acls[key] = set of reader emails
         self.acls: dict[str, set[str]] = {}
+        # Per-key injector: list_grantees(key) raises the stored exception. Stands
+        # in for an object deleted between a list snapshot and its ACL reload, so
+        # the unit tier can reach list_artifacts' degrade-one-object path (RF2 2b).
+        self.grantee_errors: dict[str, Exception] = {}
+
+    def fail_list_grantees(self, key: str, exc: Exception) -> None:
+        """Make a subsequent ``list_grantees(key)`` raise *exc* (per-key injector)."""
+        self.grantee_errors[key] = exc
 
     @property
     def bucket_name(self) -> str:
@@ -95,6 +103,9 @@ class FakeGCSClient:
         self, prefix: str | None = None, limit: int = 50
     ) -> list[dict[str, Any]]:
         await asyncio.sleep(0)
+        # A 401/403 fails the listing too (it is a real GCS call), so the unit tier
+        # can reach list_artifacts' listing-time error path (RF2 2a).
+        self._maybe_auth_fail()
         keys = sorted(self.objects)
         if prefix:
             keys = [k for k in keys if k.startswith(prefix)]
@@ -127,6 +138,9 @@ class FakeGCSClient:
 
     async def list_grantees(self, key: str) -> list[str]:
         await asyncio.sleep(0)
+        injected = self.grantee_errors.get(key)
+        if injected is not None:
+            raise injected
         return sorted(self.acls.get(key, set()))
 
     async def _apply_acl(

@@ -43,6 +43,16 @@ under `secrets/` (also gitignored). `.env.example` documents the contract.
 | `GCS_BUCKET` | yes | Bucket name only — **no** `gs://` prefix (e.g. `my-artifacts-bucket`). Not a secret; it appears as the bucket segment of returned URLs. |
 | `GOOGLE_APPLICATION_CREDENTIALS` | yes | **Absolute** path to the service-account JSON key (recommended: `secrets/gcs-sa-key.json`). |
 | `GCS_PROJECT_ID` | optional | Overrides the project id; if unset it is derived from the key/ADC. |
+| `ARTIFACT_SOURCE_ROOT` | optional | **Absolute** directory that `publish_artifact`'s `source_path` reads are confined to. **Unset ⇒ `source_path` is disabled** (publish inline `content` only). Files that resolve outside it — and credential/secret shapes (the SA key, `~/.ssh`, `~/.config/gcloud`, `*.pem`/`*.key`, anything under a `secrets/` directory) — are refused with no upload. |
+| `ARTIFACT_MAX_BYTES` | optional | Maximum uploaded artifact size in bytes, inline or `source_path` (default `104857600` = 100 MiB). An oversized file is refused from a stat, before it is read into memory. |
+
+> **Why `source_path` is locked down.** A published artifact can be shared with
+> external Google accounts, so an unconfined local-file read would be a
+> read-any-file → publish → share-to-attacker channel whose highest-value target is
+> the service-account key this server otherwise keeps hidden. `source_path` is
+> therefore default-denied: opt in per deployment with `ARTIFACT_SOURCE_ROOT`, and
+> keep the key file (and any other secret) outside that directory. Inline `content`
+> is unaffected.
 
 ### 1. Provision the bucket, service account, and key
 
@@ -159,7 +169,11 @@ never crash the session.
 - `publish_artifact` — Publish one self-contained artifact (inline `content`
   **or** a local `source_path` — exactly one) under a `title`, and optionally
   share it in the same call via `grant_emails`. Returns the permanent URL, object
-  key, content-type, size, and per-email grant results.
+  key, content-type, size, and per-email grant results. `source_path` requires
+  `ARTIFACT_SOURCE_ROOT` to be set and the file to resolve inside it (else it is
+  disabled); if the upload succeeds but a grant fails, the result still carries the
+  recoverable `key`/`url` plus a `warning` (retry with `grant_access`, don't
+  re-publish).
 - `grant_access` — Share an artifact that **already exists**: add per-object read
   access for one or more `emails` (by object key **or** full URL). Idempotent;
   returns per-email results; the URL is unchanged.

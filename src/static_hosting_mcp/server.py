@@ -29,7 +29,7 @@ from mcp.server.fastmcp import Context, FastMCP
 from mcp.types import ToolAnnotations
 from pydantic import Field
 
-from .config import Config
+from .config import ENV_MAX_BYTES, ENV_SOURCE_ROOT, Config
 from .formatters import (
     artifact_detail,
     artifact_summary,
@@ -72,21 +72,30 @@ class AppContext:
 async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
     """Build config + GCS client, reachability-check, and yield the AppContext.
 
-    A :class:`StartupError` from the reachability probe (U3) is converted into a
-    clean, actionable stderr line — the message already names the bucket — plus a
-    non-zero exit, mirroring ``main()``'s missing-env fail-fast. This keeps the
-    operator from seeing a raw anyio/``mcp.run()`` traceback when the bucket or
-    credentials are wrong (R12 wiring). On normal shutdown the ``finally`` tears
-    the client down best-effort.
+    Both startup failure modes are converted into a clean, actionable stderr line
+    plus a non-zero exit, so the operator never sees a raw anyio/``mcp.run()``
+    traceback (R12 wiring): a :class:`ValueError` from :meth:`Config.from_env` (a
+    missing required var, or a *relative* ``GOOGLE_APPLICATION_CREDENTIALS`` whose
+    path shape is invalid) and a :class:`StartupError` from the reachability probe
+    (U3, message already names the bucket). Catching the ``from_env`` error here —
+    not only in ``main()`` — gives every entry point (``mcp dev``, the FastMCP CLI)
+    the same fail-fast contract (RF6). On normal shutdown the ``finally`` tears the
+    client down best-effort.
     """
-    config = Config.from_env()
+    try:
+        config = Config.from_env()
+    except ValueError as exc:
+        # A missing var or a bad credential *path shape* — one actionable line,
+        # clean exit, no traceback (RF6), before any client is constructed.
+        print(f"[static-hosting-mcp] {exc}", file=sys.stderr)
+        sys.exit(1)
     client: GCSClientProtocol = GCSClient(
         config.bucket, key_path=config.key_path, project=config.project
     )
     try:
         await client.check_reachable()
     except StartupError as exc:
-        # Mirror main()'s missing-env pattern: one actionable line, clean exit.
+        # Mirror the missing-env pattern: one actionable line, clean exit.
         print(f"[static-hosting-mcp] {exc}", file=sys.stderr)
         sys.exit(1)
     try:
@@ -234,23 +243,36 @@ async def list_artifacts(
     # scan. ``total`` is therefore the size of *this* page (U4's list_result
     # computes it as len(items)), not a full-prefix count (deferred, plan
     # Non-Goals).
-    fetched = await app.client.list_objects(prefix=prefix, limit=limit + 1)
-    truncated = len(fetched) > limit
-    page = fetched[:limit]
-    # Curated summaries report a grantee *count* (never the ACL itself, so a
-    # listing cannot leak who an object is shared with). list_objects does not
-    # carry ACLs, so read each object's grantees — concurrently, to keep the
-    # listing responsive.
-    grantee_lists = await asyncio.gather(
-        *(app.client.list_grantees(obj["key"]) for obj in page)
-    )
+    try:
+        fetched = await app.client.list_objects(prefix=prefix, limit=limit + 1)
+        truncated = len(fetched) > limit
+        page = fetched[:limit]
+        # Curated summaries report a grantee *count* (never the ACL itself, so a
+        # listing cannot leak who an object is shared with). list_objects does not
+        # carry ACLs, so read each object's grantees — concurrently, to keep the
+        # listing responsive. return_exceptions=True so a single object deleted
+        # between the list_objects snapshot and its ACL reload degrades to a null
+        # grantee_count instead of collapsing the whole page (RF2 2b).
+        grantee_lists = await asyncio.gather(
+            *(app.client.list_grantees(obj["key"]) for obj in page),
+            return_exceptions=True,
+        )
+    except GCSError as exc:
+        # list_artifacts was the only GCS-touching tool whose client calls ran
+        # unguarded; a listing-time GCSError (e.g. a 403 AuthError) now returns the
+        # same curated isError dict as every sibling, not a raw protocol error
+        # (RF2 2a).
+        return _handle_api_error(exc)
     items = [
         artifact_summary(
             key=obj["key"],
             url=app.client.authenticated_url(obj["key"]),
             created=obj["created"],
             size=obj["size"],
-            grantee_count=len(grantees),
+            # A per-object list_grantees failure (the object vanished mid-listing)
+            # surfaces as a captured exception here; report an unknown count rather
+            # than sink the page.
+            grantee_count=(None if isinstance(grantees, BaseException) else len(grantees)),
         )
         for obj, grantees in zip(page, grantee_lists, strict=True)
     ]
@@ -372,6 +394,27 @@ def _malformed_email_message(email: str) -> str:
         "changed for it. Provide a Google-account email such as 'name@example.com'."
     )
 
+
+def _publish_grant_outcomes(
+    classified: list[tuple[str, bool]], *, grant_error: str | None
+) -> list[dict]:
+    """Shape per-email grant outcomes for ``publish_artifact`` (RF5).
+
+    A malformed email always carries its skip message. A *valid* email is a clean
+    success unless the batched grant failed post-upload (``grant_error`` set), in
+    which case it is marked failed with that message — so the returned result names
+    exactly which grants did not land while still carrying the recoverable key/url.
+    """
+
+    def _triple(email: str, ok: bool) -> tuple[str, bool, str | None]:
+        if not ok:
+            return email, False, _malformed_email_message(email)
+        if grant_error is not None:
+            return email, False, grant_error
+        return email, True, None
+
+    return grant_results(_triple(email, ok) for email, ok in classified)
+
 async def _change_access(
     client: GCSClientProtocol,
     object_ref: str,
@@ -403,6 +446,107 @@ async def _change_access(
         (email, ok, None if ok else _malformed_email_message(email)) for email, ok in classified
     )
     return {"key": key, "url": client.authenticated_url(key), field: outcomes}
+
+
+# ---------------------------------------------------------------------------
+# Source-path safety (RF1, security S1 / P0)
+# ---------------------------------------------------------------------------
+#
+# publish_artifact reads a caller-controlled local file, uploads it, and can share
+# it with an external Google account in the same call. Unconfined, that is a
+# read-any-local-file -> publish -> share-to-attacker primitive whose highest-value
+# target is the service-account key the whole repr=False credential design hides.
+# Every source_path read therefore passes _check_source_path first: canonicalize,
+# refuse credential/secret shapes (regardless of root), require an operator-opted-in
+# allow-list root (default-deny), and require a regular file (closes the FIFO /
+# device event-loop-hang). The read itself is offloaded and size-capped by the
+# caller.
+
+# Suffixes and directory names that are credential/secret shapes, refused as a
+# source_path regardless of ARTIFACT_SOURCE_ROOT.
+_SECRET_PATH_SUFFIXES = (".pem", ".key")
+_SECRET_DIR_NAMES = frozenset({"secrets"})
+
+
+def _is_within(path: Path, root: Path) -> bool:
+    """Whether *path* equals or lives under *root* (both already canonicalized)."""
+    try:
+        return path == root or path.is_relative_to(root)
+    except (OSError, ValueError):
+        return False
+
+
+def _is_secret_path(resolved: Path, config: Config) -> bool:
+    """Whether the canonicalized *resolved* path is a credential/secret shape.
+
+    Refused independently of the allow-list root (so a secret inside the root is
+    still refused): the configured service-account key, anything under ``~/.ssh`` /
+    ``~/.config/gcloud`` / ``~/.gnupg``, any path with a ``secrets`` directory
+    component, and ``*.pem`` / ``*.key`` files (RF1 / R11/R13).
+    """
+    if config.key_path:
+        try:
+            if resolved == Path(config.key_path).resolve():
+                return True
+        except OSError:  # pragma: no cover - resolve() of a configured path
+            pass
+    home = Path.home()
+    for protected in (home / ".ssh", home / ".config" / "gcloud", home / ".gnupg"):
+        if _is_within(resolved, protected):
+            return True
+    if any(part in _SECRET_DIR_NAMES for part in resolved.parts):
+        return True
+    return resolved.suffix.lower() in _SECRET_PATH_SUFFIXES
+
+
+def _check_source_path(source_path: str, config: Config) -> tuple[Path | None, dict | None]:
+    """Validate a caller's *source_path* against the RF1 policy.
+
+    Returns ``(resolved_path, None)`` when the file may be read, or
+    ``(None, error_dict)`` with a structured refusal and **no** upload otherwise.
+    Order matters: canonicalize -> refuse secret shapes (regardless of root) ->
+    require a configured allow-list root and confinement (canonicalization closes
+    symlink escapes) -> require a regular file (closes the ``/dev/zero`` / FIFO
+    permanent event-loop stall, adversarial A6).
+    """
+    try:
+        resolved = Path(source_path).resolve()
+    except OSError as exc:
+        return None, error(f"Could not resolve source_path {source_path!r}: {exc}.")
+
+    if _is_secret_path(resolved, config):
+        return None, error(
+            "Refusing to read source_path: it resolves to a credential or secret "
+            "location. This server never uploads service-account keys, SSH keys, or "
+            "files under a secrets directory. No object was created.",
+            hint="Publish only non-secret artifacts, or pass inline `content` for text.",
+        )
+
+    root = config.artifact_source_root
+    if root is None:
+        return None, error(
+            "source_path uploads are disabled: no allowed source directory is "
+            f"configured. Set {ENV_SOURCE_ROOT} to an absolute directory to enable "
+            "reading local files, or pass inline `content` instead. No object was "
+            "created.",
+            hint=f"Set {ENV_SOURCE_ROOT} to the directory your artifacts live in.",
+        )
+    if not _is_within(resolved, Path(root)):
+        return None, error(
+            f"source_path {source_path!r} resolves outside the allowed source "
+            f"directory ({root}); it was not read and no object was created.",
+            hint=f"Place the file under {ENV_SOURCE_ROOT} ({root}), or pass inline `content`.",
+        )
+
+    if not resolved.is_file():
+        return None, error(
+            f"source_path {source_path!r} is not a regular file (it may be missing, a "
+            "directory, or a special/device file); it was not read and no object was "
+            "created.",
+            hint="Provide a path to an existing regular file, or pass inline `content`.",
+        )
+
+    return resolved, None
 
 
 # ---------------------------------------------------------------------------
@@ -480,7 +624,9 @@ async def publish_artifact(
     per-email `grants` (empty when no `grant_emails` were given). On a UBLA-on
     bucket the object is uploaded but the grant returns an actionable error.
     """
-    client = _ctx(ctx).client
+    app = _ctx(ctx)
+    client = app.client
+    config = app.config
 
     # Presence-based XOR (tests *which field was supplied*, not truthiness, so an
     # explicit empty string still counts as "content supplied" — AE7).
@@ -505,8 +651,32 @@ async def publish_artifact(
     else:
         # The XOR above guarantees source_path is set when content is None.
         assert source_path is not None
+        # RF1: confine the read to the operator's allow-list root, refuse secret
+        # shapes, and require a regular file — all before any I/O on the bytes.
+        resolved, src_error = _check_source_path(source_path, config)
+        if src_error is not None:
+            return src_error
+        assert resolved is not None
+        # Size-cap from a stat *before* reading, so an oversized (or special) file
+        # is refused without being pulled into memory (RF1 OOM guard).
         try:
-            data = Path(source_path).read_bytes()
+            file_size = resolved.stat().st_size
+        except OSError as exc:
+            return error(
+                f"Could not read source_path {source_path!r}: {exc}.",
+                hint="Check the file exists and is readable from the server's working directory.",
+            )
+        if file_size > config.artifact_max_bytes:
+            return error(
+                f"source_path {source_path!r} is {file_size} bytes, over the "
+                f"{config.artifact_max_bytes}-byte limit; it was not read and no "
+                "object was created.",
+                hint=f"Raise {ENV_MAX_BYTES} or publish a smaller artifact.",
+            )
+        # Offload the blocking read so the stdio event loop is never blocked (RF1 /
+        # performance #2), restoring this module's no-blocking-I/O invariant.
+        try:
+            data = await asyncio.to_thread(resolved.read_bytes)
         except OSError as exc:
             return error(
                 f"Could not read source_path {source_path!r}: {exc}.",
@@ -517,6 +687,15 @@ async def publish_artifact(
         return error(
             "Refusing to publish an empty (zero-byte) artifact. Supply non-empty "
             "`content` or a non-empty file. No object was created."
+        )
+
+    # Cap applies to inline content too (the source path is stat-capped above); a
+    # uniform guard here also catches a file that grew between stat and read (RF1).
+    if len(data) > config.artifact_max_bytes:
+        return error(
+            f"Artifact is {len(data)} bytes, over the {config.artifact_max_bytes}-byte "
+            "limit; no object was created.",
+            hint=f"Raise {ENV_MAX_BYTES} or publish a smaller artifact.",
         )
 
     resolved_type = infer_content_type(
@@ -530,16 +709,30 @@ async def publish_artifact(
         return _handle_api_error(exc, reference=client.authenticated_url(key))
 
     grants: list[dict] = []
+    warning: str | None = None
     if grant_emails:
         valid, classified = _classify_emails(grant_emails)
+        grant_error: str | None = None
         if valid:
             try:
                 await client.grant_read(key, valid)
             except GCSError as exc:
-                return _handle_api_error(exc, reference=client.authenticated_url(key))
-        grants = grant_results(
-            (email, ok, None if ok else _malformed_email_message(email)) for email, ok in classified
-        )
+                # RF5: the upload already succeeded, so do NOT discard the object's
+                # key/url with a bare error — that strands a live object the agent
+                # can't address and tempts a re-publish that mints a duplicate.
+                # Mark the valid emails failed and return a recoverable
+                # success-with-warning; the grant can be retried alone via
+                # grant_access.
+                grant_error = _handle_api_error(
+                    exc, reference=client.authenticated_url(key)
+                )["error"]
+                warning = (
+                    f"The artifact was published, but granting read access failed: "
+                    f"{grant_error} The object exists at the returned key/url — retry "
+                    "the grant with grant_access; do not re-publish (that would create "
+                    "a duplicate)."
+                )
+        grants = _publish_grant_outcomes(classified, grant_error=grant_error)
 
     return publish_result(
         key=key,
@@ -547,6 +740,7 @@ async def publish_artifact(
         content_type=resolved_type,
         size=len(data),
         grants=grants,
+        warning=warning,
     )
 
 

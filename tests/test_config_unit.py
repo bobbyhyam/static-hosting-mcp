@@ -212,10 +212,12 @@ class TestAppLifespan:
         assert "Traceback" not in err
 
     @pytest.mark.asyncio
-    async def test_from_env_error_propagates_before_client_built(
-        self, monkeypatch: pytest.MonkeyPatch
+    async def test_missing_env_exits_clean_before_client_built(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        # No env set: from_env() raises ValueError before any client work.
+        # RF6: a missing-var ValueError from from_env() is converted to the same
+        # clean stderr + exit(1) contract as the reachability fail-fast (not a raw
+        # traceback), and still happens before any client is constructed.
         built = {"called": False}
 
         def _factory(*_a: Any, **_k: Any) -> FakeGCSClient:
@@ -224,11 +226,44 @@ class TestAppLifespan:
 
         monkeypatch.setattr(server, "GCSClient", _factory)
 
-        with pytest.raises(ValueError):
+        with pytest.raises(SystemExit) as excinfo:
             async with server.app_lifespan(server.mcp):
                 pass
 
+        assert excinfo.value.code == 1
         assert built["called"] is False
+        err = capsys.readouterr().err
+        assert "Missing required environment variables" in err
+        assert "Traceback" not in err
+
+    @pytest.mark.asyncio
+    async def test_relative_credentials_exit_clean_before_client_built(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # RF6: a *relative* GOOGLE_APPLICATION_CREDENTIALS passes a presence-only
+        # check but fails from_env()'s absolute-path validation. The lifespan must
+        # turn that ValueError into the clean exit contract for every entry point
+        # (mcp dev / FastMCP CLI), not a raw anyio traceback, and never build the
+        # client.
+        monkeypatch.setenv(ENV_BUCKET, "artifacts-bucket")
+        monkeypatch.setenv(ENV_CREDENTIALS, "relative/sa.json")
+        built = {"called": False}
+
+        def _factory(*_a: Any, **_k: Any) -> FakeGCSClient:
+            built["called"] = True
+            return FakeGCSClient("x")
+
+        monkeypatch.setattr(server, "GCSClient", _factory)
+
+        with pytest.raises(SystemExit) as excinfo:
+            async with server.app_lifespan(server.mcp):
+                pass
+
+        assert excinfo.value.code == 1
+        assert built["called"] is False
+        err = capsys.readouterr().err
+        assert "absolute" in err.lower()
+        assert "Traceback" not in err
 
 
 # ---------------------------------------------------------------------------
@@ -271,3 +306,45 @@ class TestCloseClient:
         assert not hasattr(fake, "close")
         assert not hasattr(fake, "aclose")
         await server._close_client(fake)  # must not raise
+
+
+# ---------------------------------------------------------------------------
+# main() entry-point fail-fast (RF6 / testing T4)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.usefixtures("clean_env")
+class TestMainEntryPoint:
+    """RF6: ``main()`` delegates validation to ``Config.from_env()`` so its
+    fail-fast inherits the absolute-path check the old presence-only loop skipped.
+    Each case raises before ``mcp.run()`` is reached, so the transport never starts.
+    """
+
+    def test_main_missing_env_exits_naming_missing_vars(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        from static_hosting_mcp import main
+
+        with pytest.raises(SystemExit) as excinfo:
+            main()
+
+        assert excinfo.value.code == 1
+        err = capsys.readouterr().err
+        assert "Missing required environment variables" in err
+        assert ENV_BUCKET in err
+        assert ENV_CREDENTIALS in err
+
+    def test_main_relative_credentials_exits_with_absolute_hint(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # The gap RF6 closes: a relative key path passed main()'s old presence-only
+        # check and only blew up later as a raw lifespan traceback.
+        monkeypatch.setenv(ENV_BUCKET, "artifacts-bucket")
+        monkeypatch.setenv(ENV_CREDENTIALS, "relative/sa.json")
+        from static_hosting_mcp import main
+
+        with pytest.raises(SystemExit) as excinfo:
+            main()
+
+        assert excinfo.value.code == 1
+        assert "absolute" in capsys.readouterr().err.lower()

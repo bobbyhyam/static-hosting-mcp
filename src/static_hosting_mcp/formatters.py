@@ -145,21 +145,31 @@ def infer_content_type(
 ) -> str:
     """Resolve the content-type for an artifact.
 
-    Precedence: an explicit *content_type* override always wins; otherwise the
-    extension of *source_path* (then *title*) is mapped via the inference table,
-    with an unknown extension yielding :data:`UNKNOWN_CONTENT_TYPE`. Inline
-    content with no usable extension defaults to
-    :data:`DEFAULT_INLINE_CONTENT_TYPE`.
+    Precedence: an explicit *content_type* override always wins; otherwise a
+    *source_path* extension is authoritative (a real filename whose extension is
+    unknown is genuinely opaque binary -> :data:`UNKNOWN_CONTENT_TYPE`). A *title*
+    is only a hint: its trailing dotted token is honored **only when it is a
+    recognized extension**, because a human title commonly ends in a version- or
+    date-like token (``"Roadmap v1.0"`` -> ``0``, ``"Budget 2026.06"`` -> ``06``)
+    that is not a file extension at all. Inline content with no usable extension
+    falls back to :data:`DEFAULT_INLINE_CONTENT_TYPE`.
     """
     if content_type:
         return content_type
-    for candidate in (source_path, title):
-        if not candidate:
-            continue
-        ext = _extension_of(candidate)
-        if ext is None:
-            continue
-        return _EXT_TO_CONTENT_TYPE.get(ext, UNKNOWN_CONTENT_TYPE)
+    # A source_path extension is authoritative: an unrecognized one is real opaque
+    # binary (e.g. ``archive.xyz``), so it maps to octet-stream.
+    if source_path:
+        ext = _extension_of(source_path)
+        if ext is not None:
+            return _EXT_TO_CONTENT_TYPE.get(ext, UNKNOWN_CONTENT_TYPE)
+    # The title is only a hint. Treat its trailing token as an extension *only*
+    # when it is a recognized key; an unrecognized token ("Roadmap v1.0" -> "0")
+    # is part of the title, not an extension, and must not mislabel rendered HTML
+    # as octet-stream (RF3 / R2/R3).
+    if title:
+        ext = _extension_of(title)
+        if ext is not None and ext in _EXT_TO_CONTENT_TYPE:
+            return _EXT_TO_CONTENT_TYPE[ext]
     return DEFAULT_INLINE_CONTENT_TYPE
 
 
@@ -187,17 +197,28 @@ def publish_result(
     content_type: str,
     size: int,
     grants: list[dict] | None = None,
+    warning: str | None = None,
 ) -> dict:
     """Curated ``publish_artifact`` result: object key, authenticated URL,
     stored content-type, byte size, and the per-email ``grants`` outcomes
-    (an empty list when no ``grant_emails`` were supplied)."""
-    return {
+    (an empty list when no ``grant_emails`` were supplied).
+
+    When *warning* is set the upload succeeded but a follow-on grant did not: the
+    result is a **success-with-warning** that still carries the recoverable
+    ``key``/``url`` (and the failed grants in ``grants``) rather than a bare,
+    key-less error, so the artifact is addressable and the grant can be retried
+    (RF5). It is **not** an ``isError`` result — the object exists.
+    """
+    result: dict = {
         "key": key,
         "url": url,
         "content_type": content_type,
         "size": size,
         "grants": grants if grants is not None else [],
     }
+    if warning is not None:
+        result["warning"] = warning
+    return result
 
 
 def artifact_summary(
@@ -206,12 +227,14 @@ def artifact_summary(
     url: str,
     created: str | None,
     size: int,
-    grantee_count: int,
+    grantee_count: int | None,
 ) -> dict:
     """Curated one-line summary for ``list_artifacts`` items.
 
     Reports the *count* of grantees (``grantee_count``), never the ACL itself,
-    so a listing does not leak who an object is shared with.
+    so a listing does not leak who an object is shared with. ``grantee_count`` is
+    ``None`` when the count could not be read for that one object (it was deleted
+    between the list snapshot and its ACL reload) — the item is still listed (RF2).
     """
     return {
         "key": key,

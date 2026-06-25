@@ -25,16 +25,18 @@ live suite (U7); here each tool is called directly with a stand-in Context.
 
 from __future__ import annotations
 
+import os
 import re
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest import mock
 
 import pytest
+import requests.exceptions
 from google.api_core import exceptions as gexc
 from mcp.server.fastmcp import Context
 
-from static_hosting_mcp.config import Config
+from static_hosting_mcp.config import DEFAULT_MAX_ARTIFACT_BYTES, Config
 from static_hosting_mcp.gcs_client import (
     AuthError,
     GCSClient,
@@ -267,6 +269,35 @@ class TestGCSClientRealErrorMapping:
         with pytest.raises(StartupError):
             await client.check_reachable()
 
+    @pytest.mark.asyncio
+    async def test_real_get_metadata_maps_connection_error_to_typed_gcserror(self) -> None:
+        # RF4: a mid-session transport failure (requests.ConnectionError) is NOT a
+        # GoogleAPICallError, so without the dependency-down arm it would escape the
+        # wrapper uncaught. It must map to a typed, bucket-named GCSError.
+        client, mc = _real_client("artifacts-bucket")
+        mc.bucket.return_value.blob.return_value.reload.side_effect = (
+            requests.exceptions.ConnectionError("Failed to establish a new connection")
+        )
+        with pytest.raises(GCSError) as excinfo:
+            await client.get_metadata("2026/06/24/a.html")
+        # Typed as the base GCSError (not a 404/auth/UBLA subclass) and actionable.
+        assert type(excinfo.value) is GCSError
+        assert "artifacts-bucket" in str(excinfo.value)
+
+    @pytest.mark.asyncio
+    async def test_real_grant_read_maps_auth_refresh_error_to_typed_gcserror(self) -> None:
+        # RF4: a google.auth refresh failure on the ACL save (token endpoint down)
+        # is likewise non-GoogleAPICallError and must surface as a typed GCSError.
+        import google.auth.exceptions as gae
+
+        client, mc = _real_client("artifacts-bucket")
+        mc.bucket.return_value.blob.return_value.acl.save.side_effect = gae.RefreshError(
+            "could not refresh access token"
+        )
+        with pytest.raises(GCSError) as excinfo:
+            await client.grant_read("k", ["alice@example.com"])
+        assert "artifacts-bucket" in str(excinfo.value)
+
 
 # ---------------------------------------------------------------------------
 # U6 tool-layer tests (list_artifacts, get_artifact, delete_artifact)
@@ -371,6 +402,35 @@ class TestArtifactInspectionTools:
         assert result["total"] == 0
         assert result["truncated"] is False
 
+    @pytest.mark.asyncio
+    async def test_list_objects_failure_returns_curated_error(self) -> None:
+        # RF2 (2a): a listing-time GCSError (e.g. a 403 AuthError) returns the
+        # curated isError dict every sibling returns, not a raw FastMCP protocol
+        # error, and does NOT fall through to a partial listing.
+        client = FakeGCSClient("b", fail_auth=True)
+        result = await list_artifacts(ctx=_tool_ctx(client))
+        assert result["isError"] is True
+        assert "Permission denied" in result["error"]
+        assert "items" not in result
+
+    @pytest.mark.asyncio
+    async def test_list_one_grantee_failure_degrades_not_collapses_page(self) -> None:
+        # RF2 (2b): an object deleted between the list_objects snapshot and its
+        # list_grantees reload raises ObjectNotFoundError; return_exceptions=True
+        # keeps the whole page, degrading only that object's grantee_count to None.
+        client = FakeGCSClient("my-bucket")
+        await _seed(client, ["2026/06/24/a.html", "2026/06/24/b.html"])
+        await client.grant_read("2026/06/24/a.html", ["alice@example.com"])
+        client.fail_list_grantees(
+            "2026/06/24/b.html",
+            ObjectNotFoundError("vanished mid-listing", key="2026/06/24/b.html"),
+        )
+        result = await list_artifacts(ctx=_tool_ctx(client))
+        assert result["total"] == 2  # the page survived rather than collapsing
+        by_key = {i["key"]: i for i in result["items"]}
+        assert by_key["2026/06/24/a.html"]["grantee_count"] == 1
+        assert by_key["2026/06/24/b.html"]["grantee_count"] is None
+
     # -- get_artifact -------------------------------------------------------
 
     @pytest.mark.asyncio
@@ -404,6 +464,20 @@ class TestArtifactInspectionTools:
         assert result["isError"] is True
         assert "2026/06/24/missing.html" in result["error"]  # echoes the caller's ref
         assert "list_artifacts" in result["error"]  # states the next step
+
+    @pytest.mark.asyncio
+    async def test_get_artifact_dependency_down_returns_curated_iserror(self) -> None:
+        # RF4 end-to-end: a non-GoogleAPICallError transport failure under a tool
+        # still comes back as the curated isError dict every sibling returns, not a
+        # raw FastMCP protocol error. Uses the real GCSClient over a mock so the
+        # widened wrapper mapping is exercised (the fake never raises this).
+        real, mc = _real_client("artifacts-bucket")
+        mc.bucket.return_value.blob.return_value.reload.side_effect = (
+            requests.exceptions.ConnectionError("Connection refused")
+        )
+        result = await get_artifact("2026/06/24/a.html", ctx=_tool_ctx(cast(Any, real)))
+        assert result["isError"] is True
+        assert "artifacts-bucket" in result["error"]
 
     # -- delete_artifact ----------------------------------------------------
 
@@ -506,12 +580,20 @@ class TestHandleApiError:
 # ---------------------------------------------------------------------------
 
 
-def _ctx_for(client: FakeGCSClient) -> Context:
+def _ctx_for(
+    client: FakeGCSClient,
+    *,
+    source_root: str | None = None,
+    max_bytes: int = DEFAULT_MAX_ARTIFACT_BYTES,
+    key_path: str = "/abs/key.json",
+) -> Context:
     """Build a Context whose lifespan ``AppContext`` carries the in-memory fake.
 
-    The tools only ever reach ``ctx.request_context.lifespan_context.client``, so
-    a tiny duck-typed stand-in is enough; it is cast to :class:`Context` to match
-    the tool signatures (the real ``Context`` is injected by FastMCP at runtime).
+    The tools only ever reach ``ctx.request_context.lifespan_context``, so a tiny
+    duck-typed stand-in is enough; it is cast to :class:`Context` to match the tool
+    signatures (the real ``Context`` is injected by FastMCP at runtime). The
+    ``source_root`` / ``max_bytes`` / ``key_path`` knobs drive publish_artifact's
+    RF1 source-path confinement and size cap.
     """
 
     class _FakeRequestContext:
@@ -522,7 +604,12 @@ def _ctx_for(client: FakeGCSClient) -> Context:
         def __init__(self, app: AppContext) -> None:
             self.request_context = _FakeRequestContext(app)
 
-    config = Config(bucket=client.bucket_name, key_path="/abs/key.json")
+    config = Config(
+        bucket=client.bucket_name,
+        key_path=key_path,
+        artifact_source_root=source_root,
+        artifact_max_bytes=max_bytes,
+    )
     return cast(Context, _FakeContext(AppContext(client=client, config=config)))
 
 
@@ -574,12 +661,15 @@ class TestPublishArtifact:
 
     @pytest.mark.asyncio
     async def test_source_path_uploaded_with_inferred_content_type(self, tmp_path) -> None:
-        # source_path to a local file -> uploaded with the inferred content-type.
+        # source_path under the configured allow-list root -> uploaded with the
+        # inferred content-type (RF1: source_path requires ARTIFACT_SOURCE_ROOT).
         src = tmp_path / "notes.md"
         src.write_text("# Heading\n", encoding="utf-8")
         client = FakeGCSClient()
         result = await publish_artifact(
-            title="My notes", source_path=str(src), ctx=_ctx_for(client)
+            title="My notes",
+            source_path=str(src),
+            ctx=_ctx_for(client, source_root=str(tmp_path)),
         )
         key = result["key"]
         assert key.endswith(".md")
@@ -599,14 +689,30 @@ class TestPublishArtifact:
         assert client.objects == {}
 
     @pytest.mark.asyncio
-    async def test_unreadable_source_path_is_structured_error(self) -> None:
-        # A missing file surfaces a structured error, not a crash (R17 / KTD11).
+    async def test_source_path_denied_when_no_root_configured(self) -> None:
+        # RF1 default-deny: with no ARTIFACT_SOURCE_ROOT set, any source_path is
+        # refused with a structured error and no upload (R17 / KTD11).
         client = FakeGCSClient()
         result = await publish_artifact(
             title="t", source_path="/no/such/file/here.txt", ctx=_ctx_for(client)
         )
         assert result["isError"] is True
         assert "source_path" in result["error"]
+        assert "ARTIFACT_SOURCE_ROOT" in result["error"]
+        assert client.objects == {}
+
+    @pytest.mark.asyncio
+    async def test_missing_file_within_root_is_structured_error(self, tmp_path) -> None:
+        # A missing (non-regular) file *inside* the allowed root surfaces a
+        # structured error, not a crash (R17 / KTD11), and uploads nothing.
+        client = FakeGCSClient()
+        result = await publish_artifact(
+            title="t",
+            source_path=str(tmp_path / "absent.txt"),
+            ctx=_ctx_for(client, source_root=str(tmp_path)),
+        )
+        assert result["isError"] is True
+        assert "not a regular file" in result["error"]
         assert client.objects == {}
 
     @pytest.mark.asyncio
@@ -623,9 +729,13 @@ class TestPublishArtifact:
         assert await client.list_grantees(result["key"]) == ["alice@example.com"]
 
     @pytest.mark.asyncio
-    async def test_publish_on_ubla_bucket_returns_actionable_error(self) -> None:
-        # Covers AE6: UBLA-on -> the grant returns an actionable error naming the
-        # bucket + the disable command (the object itself was still uploaded).
+    async def test_publish_on_ubla_bucket_returns_recoverable_success_with_warning(
+        self,
+    ) -> None:
+        # Covers AE6 + RF5: UBLA-on -> the upload succeeds and the grant fails, so
+        # the result is a recoverable success-with-warning that still carries the
+        # key/url (NOT a bare key-less error), with the valid email marked failed
+        # and the actionable UBLA guidance in the warning. Exactly one object exists.
         client = FakeGCSClient("ubla-bucket", ubla_on=True)
         result = await publish_artifact(
             title="t",
@@ -633,11 +743,151 @@ class TestPublishArtifact:
             grant_emails=["alice@example.com"],
             ctx=_ctx_for(client),
         )
+        # Not an error result: the object is live and addressable.
+        assert "isError" not in result
+        assert result["key"]
+        assert result["url"].endswith(result["key"])
+        assert result["size"] == len(b"<html></html>")
+        # The grant failure is recorded per-email and surfaced as an actionable warning.
+        grants = {g["email"]: g for g in result["grants"]}
+        assert grants["alice@example.com"]["ok"] is False
+        assert "error" in grants["alice@example.com"]
+        assert "ubla-bucket" in result["warning"]
+        assert "uniform bucket-level access" in result["warning"].lower()
+        assert "gcloud storage buckets update" in result["warning"]
+        assert "grant_access" in result["warning"]  # how to recover
+        assert len(client.objects) == 1  # exactly one object, recoverable by key
+        # The key is genuinely usable: grant_access on a non-UBLA view would target it.
+        assert result["key"] in client.objects
+
+    # -- RF1: source_path confinement, secret refusal, size cap -------------
+
+    @pytest.mark.asyncio
+    async def test_source_path_outside_root_refused_no_upload(self, tmp_path) -> None:
+        # RF1: a real, readable file OUTSIDE the allowed root is refused, no upload.
+        outside = tmp_path / "outside.txt"
+        outside.write_text("data", encoding="utf-8")
+        root = tmp_path / "allowed"
+        root.mkdir()
+        client = FakeGCSClient()
+        result = await publish_artifact(
+            title="t",
+            source_path=str(outside),
+            ctx=_ctx_for(client, source_root=str(root)),
+        )
         assert result["isError"] is True
-        assert "ubla-bucket" in result["error"]
-        assert "uniform bucket-level access" in result["error"].lower()
-        assert "gcloud storage buckets update" in result["error"]
-        assert len(client.objects) == 1  # upload happened; only the grant failed
+        assert "outside the allowed source directory" in result["error"]
+        assert client.objects == {}
+
+    @pytest.mark.asyncio
+    async def test_source_path_symlink_escaping_root_refused(self, tmp_path) -> None:
+        # RF1: a symlink INSIDE the root pointing OUTSIDE it resolves to the real
+        # out-of-root target and is refused — canonicalization closes symlink escapes.
+        root = tmp_path / "allowed"
+        root.mkdir()
+        secret = tmp_path / "outside-secret.txt"
+        secret.write_text("top secret", encoding="utf-8")
+        link = root / "link.txt"
+        link.symlink_to(secret)
+        client = FakeGCSClient()
+        result = await publish_artifact(
+            title="t",
+            source_path=str(link),
+            ctx=_ctx_for(client, source_root=str(root)),
+        )
+        assert result["isError"] is True
+        assert "outside the allowed source directory" in result["error"]
+        assert client.objects == {}
+
+    @pytest.mark.asyncio
+    async def test_credentials_file_refused_even_inside_root(self, tmp_path) -> None:
+        # RF1: the configured service-account key is refused even when it sits INSIDE
+        # the allowed root (the secret-shape check precedes the root check) — the
+        # highest-value exfiltration target the control exists to protect.
+        key_file = tmp_path / "gcs-sa-key.json"
+        key_file.write_text('{"type":"service_account"}', encoding="utf-8")
+        client = FakeGCSClient()
+        result = await publish_artifact(
+            title="t",
+            source_path=str(key_file),
+            ctx=_ctx_for(client, source_root=str(tmp_path), key_path=str(key_file)),
+        )
+        assert result["isError"] is True
+        assert "credential" in result["error"].lower()
+        assert client.objects == {}
+
+    @pytest.mark.asyncio
+    async def test_secret_suffix_pem_refused_inside_root(self, tmp_path) -> None:
+        # RF1: independent of the configured key, a *.pem under the root is refused
+        # as a secret shape.
+        pem = tmp_path / "private.pem"
+        pem.write_text("-----BEGIN PRIVATE KEY-----", encoding="utf-8")
+        client = FakeGCSClient()
+        result = await publish_artifact(
+            title="t",
+            source_path=str(pem),
+            ctx=_ctx_for(client, source_root=str(tmp_path)),
+        )
+        assert result["isError"] is True
+        assert client.objects == {}
+
+    @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="mkfifo unavailable")
+    @pytest.mark.asyncio
+    async def test_fifo_source_path_refused_before_read(self, tmp_path) -> None:
+        # RF1 / adversarial A6: a FIFO is refused by the is_file() gate BEFORE any
+        # read, so a read that would block the event loop forever never happens.
+        fifo = tmp_path / "pipe"
+        os.mkfifo(fifo)
+        client = FakeGCSClient()
+        result = await publish_artifact(
+            title="t",
+            source_path=str(fifo),
+            ctx=_ctx_for(client, source_root=str(tmp_path)),
+        )
+        assert result["isError"] is True
+        assert "not a regular file" in result["error"]
+        assert client.objects == {}
+
+    @pytest.mark.asyncio
+    async def test_source_path_over_max_bytes_refused_without_upload(self, tmp_path) -> None:
+        # RF1: a file larger than the cap is refused from a stat (no read into
+        # memory — the OOM guard) and nothing is uploaded.
+        big = tmp_path / "big.txt"
+        big.write_bytes(b"x" * 50)
+        client = FakeGCSClient()
+        result = await publish_artifact(
+            title="t",
+            source_path=str(big),
+            ctx=_ctx_for(client, source_root=str(tmp_path), max_bytes=10),
+        )
+        assert result["isError"] is True
+        assert "over the" in result["error"]
+        assert client.objects == {}
+
+    @pytest.mark.asyncio
+    async def test_inline_content_over_max_bytes_refused(self) -> None:
+        # RF1: the size cap applies to inline content too.
+        client = FakeGCSClient()
+        result = await publish_artifact(
+            title="t", content="x" * 100, ctx=_ctx_for(client, max_bytes=10)
+        )
+        assert result["isError"] is True
+        assert "over the" in result["error"]
+        assert client.objects == {}
+
+    @pytest.mark.asyncio
+    async def test_inline_title_ending_in_version_token_is_html_not_bin(self) -> None:
+        # RF3 at the tool level: a version-like title token must not mislabel inline
+        # HTML as octet-stream / a .bin key (it would download instead of render).
+        client = FakeGCSClient("my-bucket")
+        result = await publish_artifact(
+            title="Roadmap v1.0",
+            content="<html><body>x</body></html>",
+            ctx=_ctx_for(client),
+        )
+        assert result["content_type"] == "text/html"
+        assert result["key"].endswith(".html")
+        assert not result["key"].endswith(".bin")
 
 
 

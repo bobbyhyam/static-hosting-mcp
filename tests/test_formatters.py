@@ -43,6 +43,31 @@ def test_publish_result_defaults_grants_to_empty_list():
     assert result["grants"] == []
 
 
+def test_publish_result_omits_warning_key_when_none():
+    # RF5: the warning key is additive — a clean publish has no `warning` and stays
+    # the exact documented shape.
+    result = publish_result(key="k", url="u", content_type="text/html", size=0)
+    assert "warning" not in result
+
+
+def test_publish_result_carries_warning_and_key_url_on_partial_success():
+    # RF5: a post-upload grant failure is a success-with-warning that STILL carries
+    # the recoverable key/url (not a key-less error), plus the per-email failure.
+    result = publish_result(
+        key="2026/06/24/x-abc123.html",
+        url="https://storage.cloud.google.com/bkt/2026/06/24/x-abc123.html",
+        content_type="text/html",
+        size=42,
+        grants=[{"email": "a@example.com", "ok": False, "error": "grant failed"}],
+        warning="published but grant failed; retry with grant_access",
+    )
+    assert "isError" not in result  # the object exists; this is not an error result
+    assert result["key"] == "2026/06/24/x-abc123.html"
+    assert result["url"].endswith(result["key"])
+    assert result["warning"]
+    assert result["grants"][0]["ok"] is False
+
+
 # --- artifact_summary ------------------------------------------------------
 
 

@@ -40,8 +40,23 @@ import asyncio
 from collections.abc import Iterable, Sequence
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
+import google.auth.exceptions
+import requests.exceptions
 from google.api_core import exceptions as gexc
 from google.cloud import storage
+
+# Transport/retry/auth failures that mean "the storage backend is unreachable" but
+# are NOT ``GoogleAPICallError`` subclasses, so the per-operation ``except
+# gexc.GoogleAPICallError`` arm misses them: ``RetryError`` (the SDK exhausted its
+# retries), ``requests`` transport errors (network/DNS/TLS), and ``google.auth``
+# errors (token refresh / auth endpoint down). Mapping these to a typed
+# :class:`GCSError` keeps the curated, never-crash error contract (R17/KTD11) in
+# the canonical mid-session "dependency is down" case, not just at startup (RF4).
+_DEPENDENCY_DOWN_ERRORS = (
+    gexc.RetryError,
+    requests.exceptions.RequestException,
+    google.auth.exceptions.GoogleAuthError,
+)
 
 # The single source of truth for the user-facing authenticated-URL prefix
 # (KTD3/KTD7). ``build_authenticated_url`` and ``normalize_object_ref`` are the
@@ -267,6 +282,8 @@ class GCSClient:
                 blob.upload_from_string(data, content_type=content_type)
             except gexc.GoogleAPICallError as exc:
                 raise self._map_error(exc, key=key) from exc
+            except _DEPENDENCY_DOWN_ERRORS as exc:
+                raise GCSError(self._unreachable_message(exc)) from exc
 
         await asyncio.to_thread(_do)
 
@@ -284,6 +301,8 @@ class GCSClient:
                 raise ObjectNotFoundError(self._not_found_message(key), key=key) from exc
             except gexc.GoogleAPICallError as exc:
                 raise self._map_error(exc, key=key) from exc
+            except _DEPENDENCY_DOWN_ERRORS as exc:
+                raise GCSError(self._unreachable_message(exc)) from exc
             return self._metadata_dict(key, blob.size, blob.content_type, blob.time_created)
 
         return await asyncio.to_thread(_do)
@@ -308,6 +327,8 @@ class GCSClient:
                 ]
             except gexc.GoogleAPICallError as exc:
                 raise self._map_error(exc) from exc
+            except _DEPENDENCY_DOWN_ERRORS as exc:
+                raise GCSError(self._unreachable_message(exc)) from exc
 
         return await asyncio.to_thread(_do)
 
@@ -326,6 +347,8 @@ class GCSClient:
                 raise ObjectNotFoundError(self._not_found_message(key), key=key) from exc
             except gexc.GoogleAPICallError as exc:
                 raise self._map_error(exc, key=key) from exc
+            except _DEPENDENCY_DOWN_ERRORS as exc:
+                raise GCSError(self._unreachable_message(exc)) from exc
 
         await asyncio.to_thread(_do)
 
@@ -337,6 +360,8 @@ class GCSClient:
                 return bool(self._bucket.blob(key).exists())
             except gexc.GoogleAPICallError as exc:
                 raise self._map_error(exc, key=key) from exc
+            except _DEPENDENCY_DOWN_ERRORS as exc:
+                raise GCSError(self._unreachable_message(exc)) from exc
 
         return await asyncio.to_thread(_do)
 
@@ -371,6 +396,8 @@ class GCSClient:
                 raise ObjectNotFoundError(self._not_found_message(key), key=key) from exc
             except gexc.GoogleAPICallError as exc:
                 raise self._map_error(exc, key=key) from exc
+            except _DEPENDENCY_DOWN_ERRORS as exc:
+                raise GCSError(self._unreachable_message(exc)) from exc
             return sorted(reader_emails_from_acl(blob.acl))
 
         return await asyncio.to_thread(_do)
@@ -396,6 +423,8 @@ class GCSClient:
                 acl.save()
             except gexc.GoogleAPICallError as exc:
                 raise self._map_error(exc, key=key, acl=True) from exc
+            except _DEPENDENCY_DOWN_ERRORS as exc:
+                raise GCSError(self._unreachable_message(exc)) from exc
             verb = "granted" if grant else "revoked"
             results: list[dict[str, Any]] = [
                 {"email": email, "ok": True, "status": verb} for email in email_list
@@ -443,6 +472,22 @@ class GCSClient:
             "Verify GCS_BUCKET names an existing bucket, GOOGLE_APPLICATION_CREDENTIALS "
             "points at a valid service-account key (or ADC is configured), and the "
             "service account holds roles/storage.objectAdmin on the bucket."
+        )
+
+    def _unreachable_message(self, exc: object) -> str:
+        """Actionable message for a mid-session "dependency is down" failure (RF4).
+
+        Used for the transport/retry/auth errors in
+        :data:`_DEPENDENCY_DOWN_ERRORS` that are not ``GoogleAPICallError`` and so
+        carry no HTTP status — the bucket is named so the curated tool error stays
+        actionable just like the startup probe's.
+        """
+        return (
+            f"Could not reach GCS bucket '{self._bucket_name}': {exc}. "
+            "The storage backend may be unreachable (network/DNS/TLS), its request "
+            "retries may be exhausted, or the service-account credentials could not "
+            "be refreshed. Verify connectivity and that GOOGLE_APPLICATION_CREDENTIALS "
+            "is still valid, then retry."
         )
 
     def _not_found_message(self, key: str | None) -> str:

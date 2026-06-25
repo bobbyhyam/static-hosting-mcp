@@ -21,6 +21,39 @@ from dataclasses import dataclass, field
 ENV_BUCKET = "GCS_BUCKET"
 ENV_CREDENTIALS = "GOOGLE_APPLICATION_CREDENTIALS"
 ENV_PROJECT = "GCS_PROJECT_ID"
+# Operator-controlled allow-list root for publish_artifact's source_path, and the
+# upload size cap. Both gate the local-file read that the P0 review finding hardens
+# (RF1): source_path is default-denied unless ARTIFACT_SOURCE_ROOT names a directory
+# to confine reads to.
+ENV_SOURCE_ROOT = "ARTIFACT_SOURCE_ROOT"
+ENV_MAX_BYTES = "ARTIFACT_MAX_BYTES"
+
+# Default maximum artifact size (inline content or source_path file): 100 MiB.
+# Bounds the in-memory read so a caller-controlled path cannot drive the process
+# to OOM; override with ARTIFACT_MAX_BYTES (RF1).
+DEFAULT_MAX_ARTIFACT_BYTES = 100 * 1024 * 1024
+
+
+def _parse_max_bytes(raw: str | None) -> int:
+    """Parse ``ARTIFACT_MAX_BYTES`` into a positive int, or fall back to default.
+
+    A malformed value is a fail-fast ``ValueError`` (caught at startup alongside the
+    other config errors), not a silent fallback, so a typo cannot quietly disable the
+    cap.
+    """
+    if raw is None or raw.strip() == "":
+        return DEFAULT_MAX_ARTIFACT_BYTES
+    try:
+        value = int(raw)
+    except ValueError:
+        raise ValueError(
+            f"{ENV_MAX_BYTES} must be a positive integer number of bytes, got {raw!r}."
+        ) from None
+    if value <= 0:
+        raise ValueError(
+            f"{ENV_MAX_BYTES} must be a positive integer number of bytes, got {value}."
+        )
+    return value
 
 
 @dataclass(frozen=True)
@@ -40,6 +73,12 @@ class Config:
     # Optional GCP project override; ``None`` means it is derived from the key
     # or ADC at client-construction time (U3).
     project: str | None = None
+    # Absolute, canonicalized directory that publish_artifact's source_path reads
+    # are confined to. ``None`` (the default) means source_path is **denied** — the
+    # operator must opt in by setting ARTIFACT_SOURCE_ROOT (RF1 / security S1).
+    artifact_source_root: str | None = None
+    # Upper bound on an uploaded artifact's byte size (inline or source_path).
+    artifact_max_bytes: int = DEFAULT_MAX_ARTIFACT_BYTES
 
     @classmethod
     def from_env(cls) -> Config:
@@ -76,4 +115,23 @@ class Config:
                 f"{ENV_CREDENTIALS} to the file's absolute path (or use keyless ADC)."
             )
 
-        return cls(bucket=bucket, key_path=key_path, project=project)
+        # source_path allow-list root: optional, but if set it must be absolute
+        # (same unpredictable-working-directory reasoning as the key path) and is
+        # canonicalized so the publish-time confinement check compares realpaths.
+        source_root = os.environ.get(ENV_SOURCE_ROOT) or None
+        if source_root is not None:
+            if not os.path.isabs(source_root):
+                raise ValueError(
+                    f"{ENV_SOURCE_ROOT} must be an absolute path to the directory "
+                    "that source_path uploads are allowed to read from, but a "
+                    "relative path was given."
+                )
+            source_root = os.path.realpath(source_root)
+
+        return cls(
+            bucket=bucket,
+            key_path=key_path,
+            project=project,
+            artifact_source_root=source_root,
+            artifact_max_bytes=_parse_max_bytes(os.environ.get(ENV_MAX_BYTES)),
+        )
