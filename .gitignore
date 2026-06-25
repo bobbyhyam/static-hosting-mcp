@@ -29,3 +29,6 @@ secrets/*
 # Gas City
 .beads/*
 !.beads/identity.toml
+
+# Local dev setup
+.mcp.json
