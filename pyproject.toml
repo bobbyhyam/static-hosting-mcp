@@ -3,13 +3,32 @@ name = "static-hosting-mcp"
 version = "0.1.0"
 description = "MCP server that publishes self-contained artifacts to a Google Cloud Storage bucket and manages per-object read access by Google-account email."
 readme = "README.md"
+license = "MIT"
+authors = [{ name = "Bobby Hyam" }]
 requires-python = ">=3.11"
 keywords = ["mcp", "gcs", "google-cloud-storage", "static-hosting", "fastmcp"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Internet :: WWW/HTTP",
+    "Typing :: Typed",
+]
 dependencies = [
     "mcp[cli]>=1.26,<2",
     "google-cloud-storage>=2.18",
     "pydantic>=2.12",
 ]
+
+[project.urls]
+Homepage = "https://github.com/bobbyhyam/static-hosting-mcp"
+Repository = "https://github.com/bobbyhyam/static-hosting-mcp"
+Issues = "https://github.com/bobbyhyam/static-hosting-mcp/issues"
+Changelog = "https://github.com/bobbyhyam/static-hosting-mcp/blob/main/CHANGELOG.md"
 
 [project.scripts]
 static-hosting-mcp = "static_hosting_mcp:main"
@@ -26,6 +45,38 @@ dev = [
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+# ---------------------------------------------------------------------------
+# Distribution boundaries (R10): pin the wheel package and the sdist contents
+# so internal / operational directories never enter a published artifact.
+# ---------------------------------------------------------------------------
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/static_hosting_mcp"]
+
+[tool.hatch.build.targets.sdist]
+# Whitelist the user-facing distribution. Any future *user-facing* docs page
+# must be added here explicitly (or the `docs/` exclude below narrowed to
+# `docs/brainstorms/`), or it will be silently omitted from the sdist.
+include = [
+    "src/",
+    "tests/",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md",
+    "pyproject.toml",
+]
+# Defense in depth alongside the include whitelist: never ship internal or
+# operational trees even if the selection logic changes.
+exclude = [
+    "plans/",
+    ".gc/",
+    "gascity/",
+    ".beads/",
+    "secrets/",
+    "worktrees/",
+    "docs/",
+]
 
 # ---------------------------------------------------------------------------
 # Tooling configuration (mirrors the ultimate-brain-mcp reference)
