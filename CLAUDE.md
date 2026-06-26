@@ -1,8 +1,10 @@
 # CLAUDE.md — working in static-hosting-mcp
 
 Guidance for any Claude Code session working in this repo. For what the server
-*is* and how an operator deploys it, see [`README.md`](README.md); for the test
-code, see [`tests/`](tests).
+*is* and how an operator deploys it, see [`README.md`](README.md); for the
+contributor workflow — setup, the test tiers, lint/type checks, and PR
+expectations — see [`CONTRIBUTING.md`](CONTRIBUTING.md); for the test code, see
+[`tests/`](tests).
 
 This is a stdio MCP server with six tools (`publish_artifact`, `grant_access`,
 `revoke_access`, `list_artifacts`, `get_artifact`, `delete_artifact`). Because the
