@@ -7,7 +7,7 @@ config for the process lifetime. Tools (U5/U6) read that context through
 :func:`_ctx`; credentials and the key path stay in the lifespan and never reach
 the tool surface (R11, KTD8).
 
-Following the ``ultimate-brain-mcp`` reference shape: an ``@asynccontextmanager``
+The lifespan follows a standard FastMCP shape: an ``@asynccontextmanager``
 ``app_lifespan`` yielding a frozen-ish ``AppContext`` dataclass, and a small
 ``_ctx`` accessor the tool layer uses to reach it.
 """

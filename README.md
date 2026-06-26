@@ -1,11 +1,14 @@
 # static-hosting-mcp
 
+[![CI](https://github.com/bobbyhyam/static-hosting-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/bobbyhyam/static-hosting-mcp/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/static-hosting-mcp)](https://pypi.org/project/static-hosting-mcp/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/bobbyhyam/static-hosting-mcp/blob/main/LICENSE)
+
 A Python **stdio MCP server** that publishes a one-off artifact — a research
 report, a plan, some rendered HTML — to a Google Cloud Storage bucket and hands
 back a **permanent, access-controlled URL**, plus tools to grant and revoke read
 access by Google-account email. Bucket and service-account credentials are loaded
-from the environment and are never exposed to the LLM, mirroring the
-`ultimate-brain-mcp` reference server.
+from the environment and are never exposed to the LLM.
 
 The returned URL is a **permanent authenticated URL** of the form
 `https://storage.cloud.google.com/<bucket>/<object_key>`. It opens for any Google
@@ -33,7 +36,7 @@ does not expire.
 ## Operator setup
 
 The server reads its configuration from the environment. The **correct place** to
-put it is a `.env` file at the rig root (already gitignored), with the key file
+put it is a `.env` file at the project root (already gitignored), with the key file
 under `secrets/` (also gitignored). `.env.example` documents the contract.
 
 ### Environment contract
@@ -117,7 +120,7 @@ cp .env.example .env
 
 ## Running locally
 
-This is a local `uv` project (no PyPI / `uvx` packaging yet). From the rig root:
+This is a local `uv` project. From the project root:
 
 ```bash
 uv sync                      # resolve and install dependencies

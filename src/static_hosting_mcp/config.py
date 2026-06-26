@@ -2,9 +2,9 @@
 
 ``Config.from_env()`` reads the operator's environment into a frozen dataclass
 and fails fast — with a single ``ValueError`` naming *every* missing required
-variable — before the server constructs a GCS client. This mirrors the
-``ultimate-brain-mcp`` reference ``UBConfig.from_env()`` missing-var aggregation
-pattern.
+variable — before the server constructs a GCS client. Aggregating all missing
+variables into one error (rather than failing on the first) is a deliberate
+fail-fast configuration pattern.
 
 The key path is credential-adjacent: it is marked ``repr=False`` so a stray
 ``repr()``/log of the config never leaks it (R11, KTD8). The bucket name is not a
