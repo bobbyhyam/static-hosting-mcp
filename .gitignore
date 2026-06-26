@@ -28,7 +28,13 @@ secrets/*
 
 # Gas City
 .beads/*
-!.beads/identity.toml
 
 # Local dev setup
 .mcp.json
+
+# Internal scaffolding — Gas City / build residue, never re-committed or distributed
+.gc/
+plans/
+gascity/
+worktrees/
+docs/brainstorms/
