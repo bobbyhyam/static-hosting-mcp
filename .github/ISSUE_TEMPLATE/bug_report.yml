@@ -1,0 +1,74 @@
+name: Bug report
+description: Report a problem with a tool or the MCP server
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing a bug. Please include enough detail to reproduce it.
+        This server publishes artifacts to a Google Cloud Storage bucket and
+        shares them via per-object ACLs, so bucket and access details matter.
+  - type: dropdown
+    id: tool
+    attributes:
+      label: Which tool / area?
+      description: The MCP tool the problem involves, or the server / setup itself.
+      options:
+        - publish_artifact
+        - grant_access
+        - revoke_access
+        - list_artifacts
+        - get_artifact
+        - delete_artifact
+        - server / setup
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you expect, and what happened instead?
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: The prompt / tool call and arguments that triggered it.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: error-payload
+    attributes:
+      label: Error payload / GCS error (if any)
+      description: >-
+        Paste the structured `{"isError": true, "error": ...}` payload the tool
+        returned, plus any underlying GCS error text — e.g. a UBLA / HTTP 400
+        ACL-grant message, a permission/auth error, or a "bucket not reachable"
+        message.
+      render: json
+    validations:
+      required: false
+  - type: textarea
+    id: bucket-setup
+    attributes:
+      label: Bucket & access setup
+      description: >-
+        Bucket access mode — fine-grained (per-object ACLs) vs Uniform
+        Bucket-Level Access (UBLA) on — and, if relevant, the object key / URL
+        and the grantee email involved. Redact anything sensitive.
+    validations:
+      required: false
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Package version (`uv pip show static-hosting-mcp` or git SHA), Python version, OS.
+      placeholder: |
+        static-hosting-mcp 0.1.0
+        Python 3.11
+        macOS 15
+    validations:
+      required: false
