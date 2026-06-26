@@ -436,9 +436,7 @@ class GCSClient:
     # -- helpers ------------------------------------------------------------
 
     @staticmethod
-    def _metadata_dict(
-        key: str, size: Any, content_type: Any, created: Any
-    ) -> dict[str, Any]:
+    def _metadata_dict(key: str, size: Any, content_type: Any, created: Any) -> dict[str, Any]:
         return {
             "key": key,
             "size": size,
@@ -462,9 +460,7 @@ class GCSClient:
             return UBLAEnabledError(self._ubla_message(exc), bucket=self._bucket_name)
         if status in (401, 403):
             return AuthError(self._auth_message(status, exc), status=status)
-        return GCSError(
-            f"GCS API error (HTTP {status}) on bucket '{self._bucket_name}': {exc}"
-        )
+        return GCSError(f"GCS API error (HTTP {status}) on bucket '{self._bucket_name}': {exc}")
 
     def _startup_message(self, exc: object) -> str:
         return (

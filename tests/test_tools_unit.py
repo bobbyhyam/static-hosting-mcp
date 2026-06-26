@@ -63,9 +63,7 @@ from .test_gcs_client import _real_client
 
 def _tool_ctx(client: FakeGCSClient) -> Any:
     """A minimal stand-in for the FastMCP Context the U6 tools read via ``_ctx``."""
-    app = AppContext(
-        client=client, config=Config(bucket=client.bucket_name, key_path="/k.json")
-    )
+    app = AppContext(client=client, config=Config(bucket=client.bucket_name, key_path="/k.json"))
     return SimpleNamespace(request_context=SimpleNamespace(lifespan_context=app))
 
 
@@ -123,9 +121,7 @@ class TestArtifactInspectionTools:
     @pytest.mark.asyncio
     async def test_list_date_prefix_filters_to_matching_keys(self) -> None:
         client = FakeGCSClient()
-        await _seed(
-            client, ["2026/06/24/a.html", "2026/06/25/b.html", "2026/07/01/c.html"]
-        )
+        await _seed(client, ["2026/06/24/a.html", "2026/06/25/b.html", "2026/07/01/c.html"])
         ctx = _tool_ctx(client)
         june = await list_artifacts(date_prefix="2026/06", ctx=ctx)
         assert [i["key"] for i in june["items"]] == [
@@ -206,9 +202,7 @@ class TestArtifactInspectionTools:
         await client.upload("2026/06/24/a.html", b"x", "text/html")
         ctx = _tool_ctx(client)
         url = "https://storage.cloud.google.com/my-bucket/2026/06/24/a.html"
-        assert await get_artifact(url, ctx=ctx) == await get_artifact(
-            "2026/06/24/a.html", ctx=ctx
-        )
+        assert await get_artifact(url, ctx=ctx) == await get_artifact("2026/06/24/a.html", ctx=ctx)
 
     @pytest.mark.asyncio
     async def test_get_missing_returns_actionable_not_found_error(self) -> None:
@@ -257,9 +251,7 @@ class TestArtifactInspectionTools:
 
     @pytest.mark.asyncio
     async def test_delete_missing_returns_actionable_not_found_error(self) -> None:
-        result = await delete_artifact(
-            "2026/06/24/missing.html", ctx=_tool_ctx(FakeGCSClient())
-        )
+        result = await delete_artifact("2026/06/24/missing.html", ctx=_tool_ctx(FakeGCSClient()))
         assert result["isError"] is True
         assert "2026/06/24/missing.html" in result["error"]
 
@@ -299,9 +291,7 @@ class TestHandleApiError:
     """The shared typed-error -> curated-dict mapping in server.py (R17)."""
 
     def test_not_found_echoes_reference_and_next_step(self) -> None:
-        result = _handle_api_error(
-            ObjectNotFoundError("x", key="k.html"), reference="bad/ref.html"
-        )
+        result = _handle_api_error(ObjectNotFoundError("x", key="k.html"), reference="bad/ref.html")
         assert result["isError"] is True
         assert "bad/ref.html" in result["error"]  # the caller's input, echoed back
         assert "list_artifacts" in result["error"]  # the next step
@@ -326,6 +316,7 @@ class TestHandleApiError:
         result = _handle_api_error(GCSError("GCS API error (HTTP 500)"))
         assert result["isError"] is True
         assert "HTTP 500" in result["error"]
+
 
 # ---------------------------------------------------------------------------
 # U5 write-tool helpers + tests (publish_artifact, grant_access, revoke_access)
@@ -630,9 +621,7 @@ class TestPublishArtifact:
     # -- RF11: the source-path gate must honor its never-raise contract ------
 
     @pytest.mark.asyncio
-    async def test_source_path_with_nul_byte_is_structured_error_no_upload(
-        self, tmp_path
-    ) -> None:
+    async def test_source_path_with_nul_byte_is_structured_error_no_upload(self, tmp_path) -> None:
         # RF11 / C3: a source_path with an embedded NUL byte makes Path.resolve()
         # raise ValueError ("embedded null character in path"), which the gate's
         # original narrow `except OSError` missed -- so _check_source_path, which
@@ -764,7 +753,6 @@ class TestPublishArtifact:
         assert not result["key"].endswith(".bin")
 
 
-
 class TestGrantAndRevokeAccess:
     """grant_access / revoke_access: idempotency, references, validation, errors."""
 
@@ -851,7 +839,6 @@ class TestGrantAndRevokeAccess:
         )
         assert result["isError"] is True
         assert "Permission denied" in result["error"]
-
 
 
 class TestWriteToolRegistration:

@@ -415,6 +415,7 @@ def _publish_grant_outcomes(
 
     return grant_results(_triple(email, ok) for email, ok in classified)
 
+
 async def _change_access(
     client: GCSClientProtocol,
     object_ref: str,
@@ -774,9 +775,9 @@ async def publish_artifact(
                 # Mark the valid emails failed and return a recoverable
                 # success-with-warning; the grant can be retried alone via
                 # grant_access.
-                grant_error = _handle_api_error(
-                    exc, reference=client.authenticated_url(key)
-                )["error"]
+                grant_error = _handle_api_error(exc, reference=client.authenticated_url(key))[
+                    "error"
+                ]
                 warning = (
                     f"The artifact was published, but granting read access failed: "
                     f"{grant_error} The object exists at the returned key/url — retry "

@@ -73,7 +73,10 @@ class TestGCSClientUnit:
         # Covers KTD7: normalize_ref is the inverse of authenticated_url and the
         # prefix string lives in exactly one place (shared by real + fake).
         key = "2026/06/24/x.html"
-        clients: list[GCSClientProtocol] = [FakeGCSClient("my-bucket"), _real_client("my-bucket")[0]]
+        clients: list[GCSClientProtocol] = [
+            FakeGCSClient("my-bucket"),
+            _real_client("my-bucket")[0],
+        ]
         for client in clients:
             url = client.authenticated_url(key)
             assert client.normalize_ref(url) == key  # full URL -> key

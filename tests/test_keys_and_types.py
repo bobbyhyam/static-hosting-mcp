@@ -183,6 +183,5 @@ def test_infer_source_path_unknown_extension_still_octet_stream_for_real_files()
     # RF3 must not regress source-path inference: a real file with an unrecognized
     # extension is genuinely opaque binary even if a version-like title is present.
     assert (
-        infer_content_type(source_path="archive.xyz", title="Roadmap v1.0")
-        == UNKNOWN_CONTENT_TYPE
+        infer_content_type(source_path="archive.xyz", title="Roadmap v1.0") == UNKNOWN_CONTENT_TYPE
     )

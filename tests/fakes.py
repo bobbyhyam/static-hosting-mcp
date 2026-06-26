@@ -112,9 +112,7 @@ class FakeGCSClient:
         out: list[dict[str, Any]] = []
         for key in keys[:limit]:
             _data, content_type, created, size = self.objects[key]
-            out.append(
-                {"key": key, "size": size, "content_type": content_type, "created": created}
-            )
+            out.append({"key": key, "size": size, "content_type": content_type, "created": created})
         return out
 
     async def delete(self, key: str) -> None:

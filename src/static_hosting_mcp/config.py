@@ -103,9 +103,7 @@ class Config:
         if not key_path:
             missing.append(ENV_CREDENTIALS)
         if missing:
-            raise ValueError(
-                f"Missing required environment variables: {', '.join(missing)}"
-            )
+            raise ValueError(f"Missing required environment variables: {', '.join(missing)}")
 
         if not os.path.isabs(key_path):
             raise ValueError(

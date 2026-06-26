@@ -54,9 +54,7 @@ class TestConfigFromEnv:
         assert config.key_path == _ABS_KEY
         assert config.project == "my-project"
 
-    def test_missing_bucket_only_names_only_bucket(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_missing_bucket_only_names_only_bucket(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv(ENV_CREDENTIALS, _ABS_KEY)
 
         with pytest.raises(ValueError) as excinfo:
@@ -75,9 +73,7 @@ class TestConfigFromEnv:
         assert ENV_BUCKET in msg
         assert ENV_CREDENTIALS in msg
 
-    def test_project_optional_defaults_to_none(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_project_optional_defaults_to_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv(ENV_BUCKET, "artifacts-bucket")
         monkeypatch.setenv(ENV_CREDENTIALS, _ABS_KEY)
 
@@ -85,9 +81,7 @@ class TestConfigFromEnv:
 
         assert config.project is None
 
-    def test_empty_project_treated_as_unset(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_empty_project_treated_as_unset(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv(ENV_BUCKET, "artifacts-bucket")
         monkeypatch.setenv(ENV_CREDENTIALS, _ABS_KEY)
         monkeypatch.setenv(ENV_PROJECT, "")
@@ -107,9 +101,7 @@ class TestConfigFromEnv:
         assert ENV_CREDENTIALS in msg
         assert "absolute" in msg.lower()
 
-    def test_missing_check_precedes_absolute_check(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_missing_check_precedes_absolute_check(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # Bucket missing AND a relative key path: the fail-fast missing-var
         # aggregation wins so the operator fixes the unset var first.
         monkeypatch.setenv(ENV_CREDENTIALS, "relative/sa.json")
@@ -127,9 +119,7 @@ class TestConfigFromEnv:
 
 class TestConfigSecrecy:
     def test_key_path_absent_from_repr_and_str(self) -> None:
-        config = Config(
-            bucket="visible-bucket", key_path="/keys/super-secret-sa.json"
-        )
+        config = Config(bucket="visible-bucket", key_path="/keys/super-secret-sa.json")
 
         for rendered in (repr(config), str(config)):
             assert "super-secret-sa.json" not in rendered
@@ -167,9 +157,7 @@ class TestAppLifespan:
             assert ctx.config.key_path == _ABS_KEY
 
     @pytest.mark.asyncio
-    async def test_constructs_client_from_config(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    async def test_constructs_client_from_config(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # The lifespan must build the client from the key path + optional
         # project (never invented), so credentials stay env-sourced.
         monkeypatch.setenv(ENV_BUCKET, "artifacts-bucket")
