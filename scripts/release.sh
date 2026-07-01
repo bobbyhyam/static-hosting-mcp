@@ -31,30 +31,41 @@ NO_WAIT=false
 WAIT_SECONDS=1200
 
 # --- Parse arguments ---
-BUMP_TYPE=""
-COMMIT_MSG=""
+# Flags may appear in any position; the first two positional args are the bump
+# type and the commit message. More than two positionals is an error so an
+# unquoted multi-word message fails loudly instead of collapsing to its last word.
+POSITIONAL=()
 
 for arg in "$@"; do
     case "$arg" in
         --dry-run) DRY_RUN=true ;;
         --no-wait) NO_WAIT=true ;;
-        major|minor|patch)
-            if [[ -z "$BUMP_TYPE" ]]; then
-                BUMP_TYPE="$arg"
-            else
-                COMMIT_MSG="$arg"
-            fi
-            ;;
-        *) COMMIT_MSG="$arg" ;;
+        --*) echo "Error: unknown flag '$arg'"; exit 1 ;;
+        *) POSITIONAL+=("$arg") ;;
     esac
 done
 
-# --- Validation ---
-if [[ -z "$BUMP_TYPE" ]]; then
-    echo "Error: bump type required (major|minor|patch)"
+if [[ ${#POSITIONAL[@]} -gt 2 ]]; then
+    echo "Error: too many arguments (${#POSITIONAL[@]}); quote the commit message as a single argument."
     echo "Usage: ./scripts/release.sh <major|minor|patch> \"<commit message>\" [--dry-run] [--no-wait]"
     exit 1
 fi
+BUMP_TYPE="${POSITIONAL[0]:-}"
+COMMIT_MSG="${POSITIONAL[1]:-}"
+
+# --- Validation ---
+case "$BUMP_TYPE" in
+    major|minor|patch) ;;
+    "")
+        echo "Error: bump type required (major|minor|patch)"
+        echo "Usage: ./scripts/release.sh <major|minor|patch> \"<commit message>\" [--dry-run] [--no-wait]"
+        exit 1
+        ;;
+    *)
+        echo "Error: invalid bump type '$BUMP_TYPE' (expected major|minor|patch)"
+        exit 1
+        ;;
+esac
 
 if [[ -z "$COMMIT_MSG" ]]; then
     echo "Error: commit message required"
@@ -75,6 +86,10 @@ fi
 
 # --- Read current version ---
 CURRENT_VERSION=$(grep -m1 '^version' "$PYPROJECT" | sed 's/version = "\(.*\)"/\1/')
+if [[ ! "$CURRENT_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    echo "Error: could not parse a semver X.Y.Z version from $PYPROJECT (got '$CURRENT_VERSION')"
+    exit 1
+fi
 IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT_VERSION"
 
 # --- Compute new version ---
@@ -89,7 +104,10 @@ BRANCH="release/${TAG}"
 RELEASE_DATE=$(date +%F)
 
 # --- Derive the GitHub repo slug (owner/repo) from the origin remote ---
-REMOTE_URL=$(git remote get-url origin)
+if ! REMOTE_URL=$(git remote get-url origin 2>/dev/null); then
+    echo "Error: no 'origin' remote found; this release flow pushes to 'origin'."
+    exit 1
+fi
 REPO_SLUG=$(echo "$REMOTE_URL" | sed -E 's#(https://github\.com/|git@github\.com:)##; s/\.git$//')
 
 # --- Preflight checks ---
