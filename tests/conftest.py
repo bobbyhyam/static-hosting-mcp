@@ -13,8 +13,7 @@ This module wires the two test tiers the plan defines (R18):
   configuration from the environment and **skips** (never fails) when it is
   incomplete, so ``pytest -m live`` is a clean no-op without a ``.env``.
 
-``.env`` is loaded at import (mirroring the ``ultimate-brain-mcp`` reference
-``conftest.py``) so the live tier picks up ``GCS_BUCKET`` /
+``.env`` is loaded at import so the live tier picks up ``GCS_BUCKET`` /
 ``GOOGLE_APPLICATION_CREDENTIALS`` / ``GCS_PROJECT_ID`` without the operator
 exporting them by hand. The unit tier never reads credentials, so the load is a
 harmless no-op there.
