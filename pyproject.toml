@@ -19,7 +19,7 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
-    "mcp[cli]>=1.26,<2",
+    "mcp[cli]>=1.28.1,<2",
     "google-cloud-storage>=2.18",
     "pydantic>=2.12",
 ]
